@@ -32,16 +32,36 @@ unique_sourcing_data <- sourcing %>% filter(`[SPRJ]Project (Project Id)` %in% un
 
 
 # select columns that we want to look at
-
 unique_sourcing_data <- unique_sourcing_data %>% select( `[SPRJ]Project (Project Id)`, `Baseline Spend`,
                                 `Savings`, `[SPRJ] Project Reason`, `[SPRJ] Spend Level`,
                                 `[SPRJ]Commodity (Commodity)`, `[SPRJ]Owner (User)`
 )
 
-# create value if savings exists or not
-unique_sourcing_data <- unique_sourcing_data %>% mutate(ifelse(Savings > 0, TRUE, FALSE))
+# Rename columns to be easier to refrence and interpret
+unique_sourcing_data <- unique_sourcing_data %>% rename(
+  pid =  `[SPRJ]Project (Project Id)`,
+  budget = `Baseline Spend`,
+  project_reason = `[SPRJ] Project Reason`,
+  spend_level = `[SPRJ] Spend Level`,
+  product_purchased = `[SPRJ]Commodity (Commodity)`, 
+  employee = `[SPRJ]Owner (User)`
+)
+
+# Remove $ and commas, and transform into numeric columns
+unique_sourcing_data <- unique_sourcing_data %>%
+  mutate(cleaned_budget = as.numeric(gsub("[$,]", "", budget)),
+         cleaned_savings = as.numeric(gsub("[$,]", "", Savings))) %>%
+  select(-budget, -Savings) %>%
+  rename(budget = cleaned_budget, savings = cleaned_savings)
 
 
+# Calculate savings_ratio and handle NAs
+unique_sourcing_data <- unique_sourcing_data %>%
+  mutate(savings_ratio = ifelse(is.na(savings) | is.na(budget), NA, savings / budget))
+
+# Create posotive_savings column indicating if savings are positive
+unique_sourcing_data <- unique_sourcing_data %>%
+  mutate(positive_savings = ifelse(savings > 0, TRUE, FALSE))
 
 ```
 
