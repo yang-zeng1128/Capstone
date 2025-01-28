@@ -1,0 +1,47 @@
+---
+title: "Honda_Project1_Offical"
+author: "Deepesh Giri.29"
+date: "2025-01-28"
+output: html_document
+---
+
+## Libraries
+
+```{r}
+library(readr)
+library(tidyverse)
+library(ggplot2)
+```
+
+## Load data from CSV file
+
+```{r}
+savings <- read_csv("Saving_Values_updated.csv")
+sourcing <- read_csv("Sourceing Data.csv")
+task <- read_csv("Task Data.csv")
+```
+
+
+```{r}
+
+# filter savings projects by unique project id
+unique_savings_PID <- unique(savings$`[SFM]Project (Project Id)`)
+
+# get savings data fram where the unique savings id matches the above list
+unique_sourcing_data <- sourcing %>% filter(`[SPRJ]Project (Project Id)` %in% unique_savings_PID)
+
+
+# select columns that we want to look at
+
+unique_sourcing_data <- unique_sourcing_data %>% select( `[SPRJ]Project (Project Id)`, `Baseline Spend`,
+                                `Savings`, `[SPRJ] Project Reason`, `[SPRJ] Spend Level`,
+                                `[SPRJ]Commodity (Commodity)`, `[SPRJ]Owner (User)`
+)
+
+# create value if savings exists or not
+unique_sourcing_data <- unique_sourcing_data %>% mutate(ifelse(Savings > 0, TRUE, FALSE))
+
+
+
+```
+
