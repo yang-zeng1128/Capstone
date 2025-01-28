@@ -1,6 +1,6 @@
 ---
 title: "Honda_Project1_Offical"
-author: "Deepesh Giri.29"
+author: "Deepesh Giri, Jonathan Levy, Lexie Cohen, Yang Zeng"
 date: "2025-01-28"
 output: html_document
 ---
@@ -64,4 +64,17 @@ unique_sourcing_data <- unique_sourcing_data %>%
   mutate(positive_savings = ifelse(savings > 0, TRUE, FALSE))
 
 ```
+## seperate project tasks by task name
 
+```{r}
+# rename columns for easier references later
+task <- task %>% rename(
+  pid = `Project - Project Id`,
+  task_name = `Task Name - Task Name`
+)
+
+# crease phase 1 and phase 2 task subsets where the task names are the required tasks
+phase1 <- task %>% filter(task_name == "Obtain Final SOW - Sourcing Clock Starts")
+phase2 <- task %>% filter(task_name == "Sourcing Complete - Sourcing Clock Stops")
+
+```
