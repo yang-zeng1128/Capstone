@@ -1,0 +1,888 @@
+---
+title: "Honda Procurement Savings Analysis Final Report"
+author: "Deepesh Giri, Jonathan Levy, Lexie Cohen, Yang Zeng"
+date: "2025-02-11"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Honda Procurement Savings Analysis
+
+## Introduction 
+
+This project aims to develop a machine learning model to predict cost savings in Honda’s procurement process based on historical project data. Honda carries out over 2,000 sourcing projects annually, making cost reduction and optimization critical for operational efficiency. By analyzing past projects, we strive to identify patterns that influence cost savings and build predictive models to estimate the savings ratio for future projects.  
+
+To achieve this, we performed extensive data preprocessing, including merging different datasets, handling missing values, and engineering relevant features. We then experimented with Ridge Regression and Random Forest models to determine which approach provides the most accurate savings predictions. Our findings shed light on key factors influencing cost savings and provide actionable recommendations for improving Honda’s procurement strategies.
+  
+This report outlines our methodology, model selection process, key results, and recommendations to enhance cost-saving predictions and improve Honda’s decision-making in procurement.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+library(readr)
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(readr)
+library(gridExtra)
+set.seed(123)  
+```
+
+## Import Both Files 
+```{r}
+#Import Sourcing Data 
+data <- read_csv("Sourcing Data2.csv", show_col_types = FALSE)
+#Import Project Tasks
+task_data <- read_csv("OSU Data 2.4(Project Tasks2).csv", show_col_types = FALSE)
+```
+
+## Cleaning of the Sourcing Data
+To clean the 'Sourcing Data' we started by changing any projects with an end date to be marked 'Complete' if they were incorrectly set to 'Active'. Then we created a new columns called 'Final Budget' which we assigned the value from Baseline Spend From the Savings data (or if that was missing, we assigned the baseline spend from the Sourcing Data). Then we deleted any projects with a missing budget because then we cannot model on savings ratio (savings/budget). Next we converted budget and savings to be stored as numeric values. Then for projects that are marked complete, we set savings to zero as those projects did not save anything. Finally, we removed any projects that are still active because we can only look at savings for complete projects. Then, we set rows with NA or missing values Number of Suppliers and Number of Proposals to Zero. We assume those projects did not look at any suppliers or submit any propisals. Lastly, we removed Supplier, SubmittedProposal, EventID, and Strategy columns as those had many missing values. 
+
+```{r}
+#Find columns with missing values then display the number of rows with missing values
+missing_proportion <- colSums(is.na(data)) / nrow(data)
+missing_proportion <- missing_proportion[missing_proportion > 0]
+missing_proportion <- round(missing_proportion, 2)
+cat("Columns With Missing Values, Proportion of Values Missing before Data Cleaning:\n")
+print(missing_proportion)
+
+
+# Make project complete if an end date
+data <- data %>%
+  mutate(State = ifelse(`End Date (Date)` != "Unclassified" & !is.na(`End Date (Date)`),
+                        "Completed", State))
+colnames(data) <- str_trim(colnames(data))
+
+
+# Make budget the second column (or the first column if second column is missing)
+primary_budget_col <- "Baseline Spend From Project"
+secondary_budget_col <- "Baseline Spend Total From Savings Form"
+
+if (secondary_budget_col %in% colnames(data)) {
+  data <- data %>%
+    mutate(Final_Budget = coalesce(!!sym(secondary_budget_col), !!sym(primary_budget_col)))
+} else {
+  data <- data %>%
+    mutate(Final_Budget = !!sym(primary_budget_col))
+}
+
+# Remove rows where both budget columns are missing
+data <- data %>%
+  filter(!is.na(Final_Budget) & Final_Budget != "$-")
+
+data <- data %>%
+  mutate(
+    Final_Budget = suppressWarnings(as.numeric(gsub("[$,]", "", Final_Budget))),
+    `Savings Total` = suppressWarnings(as.numeric(gsub("[$,]", "", `Savings Total`)))
+  )
+
+data <- data %>%
+  select(-all_of(c(primary_budget_col, secondary_budget_col)), everything())
+
+# Set Savings to Zero if the project is complete
+data <- data %>%
+  mutate(`Savings Total` = ifelse(State == "Completed" & is.na(`Savings Total`), 
+                                  0, `Savings Total`))
+
+# Remove rows where "State" is Active and "End Date" is missing
+data <- data %>%
+  filter(!(State == "Active" & `End Date (Date)` == "Unclassified"))
+
+# Any NA for # of suppliers or proposal make 0
+data <- data %>%
+  mutate(
+    `# of Suppliers Invited` = replace_na(`# of Suppliers Invited`, 0),
+    `# Of Proposals Submitted` = replace_na(`# Of Proposals Submitted`, 0)
+  )
+
+
+data <- data %>% select(-`Baseline Spend From Project`)
+
+# Remove columns with missing value
+missing_threshold <- 0.5 * nrow(data)
+data <- data %>%
+  select(where(~ sum(is.na(.)) < missing_threshold))
+
+
+```
+
+## Project Tasks Cleaning
+Next we cleaned 'Project Tasks' to be able to pull duration of Phase Two. First, we sorted it to only rows where the task name is 'Sourcing Complete - Sourcing Clock Stops" as that contains the duration of just Phase 2, the sourcing part. We modified the start and end dates to be formated as characters and turned 'Unclassified' values to NA. Next we sorted how many of these tasks had missing start or end dates, the same start and end date, or start and end dates within 2 days of eachother. We removed any values that were not more than 2 days apart as we assume those values are inputted incorrectly. Later on, these projects will be indicated as Phase2Correct is 'False'. 
+
+```{r}
+#First I am going to look at just phase 2: sourcing complete- sourcing clock stops
+phase2 <- task_data[task_data$`Task Name - Task Name` == "Sourcing Complete - Sourcing Clock Stops", ]
+cat("Number of rows where task name is 'Sourcing Complete - Sourcing Clock Stops:\n")
+nrow(phase2)
+```
+
+```{r}
+#Clean Start and End Date COlumns
+phase2$`Start Date` <- as.character(phase2$`Start Date`)
+phase2$`End Date` <- as.character(phase2$`End Date`)
+
+#replace "Unclassified" with NA
+phase2$`Start Date`[phase2$`Start Date` == "Unclassified"] <- NA
+phase2$`End Date`[phase2$`End Date` == "Unclassified"] <- NA
+
+#convert 'Start Date' and 'End Date' columns to Date format
+phase2$`Start Date` <- as.Date(phase2$`Start Date`, format="%m/%d/%Y")
+phase2$`End Date` <- as.Date(phase2$`End Date`, format="%m/%d/%Y")
+
+#make catagories
+category_counts <- table(
+  ifelse(is.na(phase2$`Start Date`) & is.na(phase2$`End Date`), "Both Unclassified",
+  ifelse(!is.na(phase2$`Start Date`) & is.na(phase2$`End Date`), "Only End Date Unclassified",
+  ifelse(is.na(phase2$`Start Date`) & !is.na(phase2$`End Date`), "Only Start Date Unclassified",
+  ifelse(phase2$`Start Date` == phase2$`End Date`, "Same Start and End Date",
+  ifelse(!is.na(phase2$`Start Date`) & !is.na(phase2$`End Date`) & 
+         abs(as.numeric(difftime(phase2$`Start Date`, phase2$`End Date`, units="days"))) < 3, 
+         "Start and End Within 1-3 Days",
+  "Different Start and End Date"
+  ))))))
+
+cat("Classification of Start and End Dates for 'Sourcing Complete - Sourcing Clock Stops:\n")
+category_counts
+```
+
+```{r}
+#Make new columns phase2iscorrect and dayDifference
+phase2$phase2iscorrect <- ifelse(
+  !is.na(phase2$`Start Date`) & !is.na(phase2$`End Date`) & 
+  abs(as.numeric(difftime(phase2$`Start Date`, 
+                          phase2$`End Date`, units = "days"))) > 2, 
+  TRUE, 
+  FALSE
+)
+
+phase2 <- phase2 %>%
+  mutate(dayDifference = ifelse(phase2iscorrect, 
+                                as.numeric(difftime(`End Date`, `Start Date`, 
+                                                    units = "days")), -1000))
+```
+
+## Prepare To Merge Sourcing Data and Phase 2 Data from Project Tasks
+
+Before we merged Sourcing Data and Phase 2 Data we removed all columns from Project Tasks besides project ID, phase2iscorrect and dayDifference because the only information we wanted to look at from Project Tasks was the correct implementation and duration of Phase 2. Next, we ensured Savings and Budget were numeric and removed the dollar sign. Then we removed the start date, end date and duration from Sourcing Data as we will use the dates from just Phase 2 from Project Tasks instead. We also removed State because it is now complete for all remaining projects. Then we we merged the cleaned Sourcing and cleaned Project Tasks Data. Next, we renamed each column name to remove spaces and parenthesis making it easier to work with. We then removed the single value where savings was greater than spend as it was an extreme outlier.
+
+```{r}
+#Remove all columns besides Project ID, Phase2IsCorrect and Day Difference
+phase2clean <- phase2 %>%
+  select(-`Required/Optional`, -`Task Id`, -`Start Date`, -`End Date`, 
+         -Status, -Type, -`count()`, -`sum(Avg Duration)`, -`Task Name - Task Name`)
+
+# rename to Savings
+colnames(data)[colnames(data) == "Savings Total"] <- "savings"
+sourcingdata<-data
+
+#remove dollar signs and commas from baseline spend and savings
+sourcingdata$savings <- gsub("[$,]", "", sourcingdata$savings)
+sourcingdata$Final_Budget <- gsub("[$,]", "", sourcingdata$Final_Budget)
+
+#turn the columns into numeric values
+sourcingdata$savings <- as.numeric(sourcingdata$savings)
+sourcingdata$Final_Budget <- as.numeric(sourcingdata$Final_Budget)
+
+sourcingdataClean <- sourcingdata %>%
+  select(-`Project (Project Name)`,  
+         -State,     -'Start Date (Date)', -'End Date (Date)', -'sum(Duration)' )
+
+```
+
+
+```{r}
+#Merge the datasets on Project ID
+mergedData <- left_join(sourcingdataClean, phase2clean, 
+                        by = c("Project (Project Id)" = "Project - Project Id"))
+```
+
+
+```{r}
+# rename columns
+colnames(mergedData)[colnames(mergedData) == "Project Reason"] <- "Reason"
+
+colnames(mergedData)[colnames(mergedData) == "Commodity (Commodity)"] <- "Commodity"
+
+colnames(mergedData)[colnames(mergedData) == "Region (Region)"] <- "Region"
+
+colnames(mergedData)[colnames(mergedData) == "Level 1 Category"] <- "Category"
+
+colnames(mergedData)[colnames(mergedData) == "Spend Level"] <- "SpendLevel"
+
+colnames(mergedData)[colnames(mergedData) == "sum(Duration)"] <- "Duration"
+
+colnames(mergedData)[colnames(mergedData) == "Project (Project Id)"] <- "ProjectID"
+
+colnames(mergedData)[colnames(mergedData) == "# of Suppliers Invited"] <- "NumSuppliers"
+
+colnames(mergedData)[colnames(mergedData) == "# Of Proposals Submitted"] <- "NumProposals"
+
+colnames(mergedData)[colnames(mergedData) == "savings"] <- "Savings"
+
+colnames(mergedData)[colnames(mergedData) == "phase2iscorrect"] <- "Phase2IsCorrect"
+
+colnames(mergedData)[colnames(mergedData) == "dayDifference"] <- "Phase2Duration"
+
+colnames(mergedData)[colnames(mergedData) == "Owner (User)"] <- "Owner"
+
+colnames(mergedData)[colnames(mergedData) == "Final_Budget"] <- "Budget"
+
+# Remove row where Savings > Baseline Spend
+mergedData <- mergedData  %>%
+  filter(Savings <= Budget)
+
+cat("Number of rows in the final data set:\n")
+print(nrow(mergedData))
+```
+
+
+## Create new variables
+Then we created three new variables, SavingsRatio, Phase2IsCorrect, Phase2Duration which are outlined below. 
+
+# Savings Ratio 
+A numerical value 0-1 which is savings/budget
+
+# Phase 2 Is Correct
+True:  Phase 2 (Sourcing Complete - Sourcing Clock Stops) has a value for start and end date that are more than 2 days apart
+
+False: Phase 2 (Sourcing Complete - Sourcing Clock Stops) exists for that project on the project tasks sheet but 
+missing values for start date, end date or both, or start date and end date are the same day or within 2 days of eachother 
+
+NoPhase2: That project does not have a row for phase 2 (Sourcing Complete - Sourcing Clock Stops) on the project tasks sheet 
+
+# Phase2Duration 
+Numerical Value: There is only a numerical value when Phase2IsCorrect is True
+
+-1000: Projects where Phase2IsCorrect is False or NoPhase2. This will create separation in the Random Forest Model between the values with a duration and without 
+
+```{r}
+#Create savingsRatio variable
+mergedData$SavingsRatio <- mergedData$Savings / mergedData$Budget
+
+#Change Phase2isCorrect to a character variable "True," "False," and "No_Phase_2" for NA.
+mergedData <- mergedData %>%
+  mutate(Phase2IsCorrect = case_when(
+    is.na(Phase2IsCorrect) ~ "NoPhase2", 
+    Phase2IsCorrect == TRUE ~ "True",      
+    Phase2IsCorrect == FALSE ~ "False"   
+  ))
+mergedData$Phase2IsCorrect <- as.character(mergedData$Phase2IsCorrect)
+
+#Update all projects with no phase 2 to have phase2 duration be -1000
+mergedData <- mergedData %>%
+  mutate(Phase2Duration = ifelse(Phase2IsCorrect == "NoPhase2", -1000, Phase2Duration))
+
+
+```
+
+Below we see that a majority of the projects we will be working with have no phase2. Additionally of the projects with phase 2 over half of them likely did not do phase 2 correctly meaning they spent too little time between sourcing starting and stopping.
+
+```{r echo=FALSE, message=FALSE}
+library(ggplot2)
+library(scales)  # For the percent formatting
+
+ggplot(mergedData, aes(x = Phase2IsCorrect)) +
+  geom_bar(fill = "blue", color = "black") +
+  geom_text(aes(label = percent(after_stat(count) / sum(after_stat(count)), accuracy = 0.1), 
+                y = after_stat(count)), 
+            stat = "count", 
+            vjust = -0.3,  # Move labels slightly above bars
+            size = 4) +  # Adjust size as needed
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +  # Expands top margin to fit labels
+  labs(title = "Distribution of Phase2IsCorrect",
+       x = "Phase2IsCorrect",
+       y = "Count") +
+  theme_minimal()
+
+```
+
+## Quality Score
+
+Our approach to quality score was to keep as simple as possible. For this reason we followed what Honda had suggested and made quality score dependent on 3 factors: Phase2 duration, savings, and number of suppliers.
+
+### Duration Component
+
+```{r}
+# isolate a subset of sourcing and task merged data to create quality scores
+quality_score <- mergedData %>% select(ProjectID, Reason, NumSuppliers, Region,
+                                       Budget, Savings, Phase2Duration, SavingsRatio)
+
+# Renewal or No Sourcing projects bypass duration penalties and are set to 100.
+quality_score <- quality_score %>% 
+  mutate(
+    qualityScoreDuration = 
+      ifelse(
+        Reason == "No Sourcing" | Reason == "Renewal", 100, NA
+      )
+  )
+
+# add expected days that a project should have taken based on budget and region
+quality_score <- quality_score %>% mutate(
+  expected_days = 
+    ifelse(
+      Budget < 25000 & Region != "Honda de México", 14, 
+      ifelse(
+        Budget <= 100000 & Region != "Honda de México", 28,
+        ifelse(
+          Budget > 100000 & Region != "Honda de México", 56,
+          ifelse(
+            Budget < 10000 & Region == "Honda de México", 14,
+            ifelse(
+              Budget <= 50000 & Region == "Honda de México", 28,
+              ifelse(
+                Budget > 50000 & Region == "Honda de México", 56, 56
+              )
+            )
+          )
+        )
+      )
+    )
+)
+
+quality_score <- quality_score %>%
+  mutate(qualityScoreDuration = ifelse(
+    is.na(qualityScoreDuration),
+    case_when(
+      Phase2Duration <= 0 ~ 0,  # Assign 0 if Phase2Duration is 0 or less
+      Phase2Duration < expected_days ~ (Phase2Duration / expected_days) * 100, # Scale up to 100
+      Phase2Duration > 2 * expected_days ~ 0,  # Penalize excessive duration
+      TRUE ~ 100 * (1 - ((Phase2Duration - expected_days) / expected_days))  # Linear decrease
+    ),
+    qualityScoreDuration  # Keep existing value if not NA
+  ))
+
+
+```
+
+Projects without a guaranteed phase 2 (no sourcing & renewals) receive a quality score of 100. For projects with a phase 2, the score scales linearly up to 100 as duration approaches the minimum threshold. Beyond this threshold, the score linearly decreases to 0 when the duration reaches twice the minimum threshold or longer.
+
+
+### Savings and number of suppliers invited
+
+The quality score for savings is straightforward: projects with savings receive 100, while those without receive 0. For suppliers, the score scales proportionally based on the number of suppliers invited relative to the guideline, up to 100 points.
+With suppliers projects that are renewal or no sourcing get a score of 100 as they do not have to follow guidelines.
+
+```{r}
+# Assign quality score for savings 100 if there was savings 0 if there was not
+quality_score <- quality_score %>%
+  mutate(qualityScoreSavings = ifelse(Savings == 0, 0, 100))
+
+# renewals and no sourcing get 100 for quality score based on suppliers invited
+quality_score <- quality_score %>%
+  mutate(qualityScoreSupplier =
+           ifelse(Reason == "No Sourcing" | Reason == "Renewal", 100, NA))
+
+# Calculate score for remaining projects based on the number of suppliers invited
+quality_score <- quality_score %>%
+  mutate(qualityScoreSupplier = ifelse(
+    is.na(qualityScoreSupplier),
+    ifelse(NumSuppliers < 3, (NumSuppliers / 3) * 100, 100),
+    qualityScoreSupplier
+  ))
+```
+
+### Combine Quality Score
+
+Finally, we combine all three scores and assign weights based on how much an employee can influence each factor. Duration carries a 60% weight, as Honda emphasized it as the most important feature. The remaining 40% is split between the supplier score (30%) and the savings score (10%), since employees have limited control over project savings. 
+
+```{r}
+# final quality score will account for factors that can be controlled and ones that can't.
+quality_score <- quality_score %>%
+  mutate(
+    qualityScore =
+      0.60 * qualityScoreDuration +  # 60% weight for sourcing
+      0.30 * qualityScoreSupplier +  # 30% weight for suppliers
+      0.10 * qualityScoreSavings     # 10% weight for savings
+  )
+
+```
+
+### Visulizations
+
+```{r, echo=FALSE, message=FALSE}
+# Filtered plot (excluding "No Sourcing" & "Renewal")
+p1 <- ggplot(
+  filter(quality_score, Reason != "No Sourcing" & Reason != "Renewal"),
+  aes(x = qualityScore, y = SavingsRatio)
+) +
+  geom_jitter(width = 1, height = 0.00) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(
+    title = "Savings Rate by Quality Score\n(Excluding Renewals & No Sourcing)",
+    x = "Total Quality Score",
+    y = "Savings Rate"
+  ) +
+  theme_minimal() 
+
+# Full dataset plot
+p2 <- ggplot(quality_score, aes(x = qualityScore, y = SavingsRatio)) +
+  geom_jitter(width = 1, height = 0.00) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(
+    title = "Savings Rate by Quality Score",
+    x = "Total Quality Score",
+    y = "Savings Rate"
+  ) +
+  theme_minimal() 
+
+# Arrange plots side by side
+grid.arrange(p1, p2, ncol = 2)
+```
+
+When plotting quality score against savings ratio, there is little correlation. While projects that follow processes more closely tend to have a higher maximum savings rate, most data points show no clear pattern. Additionally, since savings is a component of the quality score, this calculation is not suitable for predicting savings rate. Therefore, this simple quality score will not be used for modeling savings predictions. We recommend that Honda treat the quality score as a performance review rather than a predictor if savings remains a component of the score.
+
+Below we plot quality score against savings rate with scores of renewal and no sourcing vs a plot without these projects and notice see that again the plot looks similar with little correlation except there are less points with a score of 100.
+
+## Prediction Models Using Random Forest and Ridge Regression
+Our goal was to construct a Random Forest and Ridge Regression on optimal inputs
+to predict savings ratio. For both the Ridge Regression and Random Forest model to predict Savings Ratio, We tested all possible models with different combinations of predictors. The output below is the optimal Ridge Model and Random Forest Model, based on % of variance explained. The MSE and 
+RMSE from cross validation are output with each model
+
+## Random Forest Model
+
+```{r, warning=FALSE,message=FALSE}
+library(randomForest)
+
+#Set seed
+set.seed(123)
+
+# Split data into training (80%) and testing (20%) sets
+sample_size <- floor(0.8 * nrow(mergedData))
+train_index <- sample(seq_len(nrow(mergedData)), size = sample_size)
+train_data <- mergedData[train_index, ]
+test_data <- mergedData[-train_index, ]
+
+# Train Random Forest model to predict SavingsRatio
+random_forest_model <- randomForest(SavingsRatio ~   Reason + Category + 
+                                      Phase2Duration + NumSuppliers, 
+                                    data = train_data, ntree = 100, mtry = 1)
+
+# Make predictions on the test set
+predictions <- predict(random_forest_model, test_data)
+
+# Calculate MSE
+mse_value <- mean(((test_data$SavingsRatio - predictions)^2))
+
+# Calculate RMSE
+rmse_value <- sqrt(mse_value)
+
+print(random_forest_model)
+
+```
+
+```{r}
+#feature importance
+importance_values <- importance(random_forest_model)
+
+#importance values
+print(importance_values)
+varImpPlot(random_forest_model, main = "Feature Importance")
+
+print(paste("MSE:", round(mse_value, 6)))
+print(paste("RMSE:", round(rmse_value, 3)))
+```
+
+The Random Forest model for predicting SavingsRatio explains **21.99%** of the variance, indicating moderate predictive power but leaving room for improvement. The Mean Squared Error (MSE) of 0.010429 and Root Mean Squared Error (RMSE) of 0.102 suggest that the model’s average prediction error is around **10.2%** of the savings ratio, which is reasonable but not highly precise. Feature importance analysis shows that NumSuppliers is the most influential factor, followed by Reason and Category, while Phase2Duration contributes nothing to the model, suggesting it may be irrelevant. The results indicate that inviting more suppliers plays a significant role in cost savings, while other procurement project factors also have an impact.
+
+```{r}
+# Convert importance values to a data frame
+importance_df <- as.data.frame(importance_values)
+importance_df$Feature <- rownames(importance_df)
+
+# Plot feature importance
+ggplot(importance_df, aes(x = reorder(Feature, IncNodePurity), y = IncNodePurity)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Feature Importance (Random Forest)",
+   	x = "Features",
+   	y = " ") +
+  theme_minimal()
+
+```
+
+The Feature Importance (Random Forest) graph shows that NumSuppliers is the most important factor in predicting SavingsRatio, meaning that the number of suppliers invited has the biggest impact on cost savings. Reason and Category also play a role, but their impact is smaller. Phase2Duration has almost no effect, suggesting it does not help the model and might be unnecessary. This means that increasing the number of suppliers is the best way to improve savings, while the project type still matters but is less important.
+
+```{r, warning=FALSE,message=FALSE}
+library(rpart)
+library(rpart.plot)
+
+# Convert the random forest to a single tree using rpart for visualization
+rpart_model <- rpart(SavingsRatio ~	Category+ NumSuppliers + Reason
+                     + Phase2Duration 	, data = train_data)
+
+# Plot the tree
+rpart.plot(rpart_model)
+```
+
+The decision tree shows that NumSuppliers is the most important factor for predicting SavingsRatio. Projects with fewer than 3 suppliers tend to have lower savings, while those with 3 or more suppliers achieve higher savings. Reason also affects savings, with "Reason = End User RFS - Normal" leading to the highest savings ratio (0.49). Category has some impact, but its effect depends on the number of suppliers. This visualization helps simplify the Random Forest model and shows that increasing supplier participation improves cost savings.
+
+```{r}
+# Create a new data point with the correct structure
+new_data <- data.frame(
+  NumSuppliers = 2,
+  Reason = "End User RFS â€“ Normal ",
+  Phase2Duration = 30,
+  Category = "Logistics"
+)
+
+# Predict using the trained model
+predicted_value <- predict(random_forest_model, new_data)
+
+# Print the predicted output
+print(predicted_value)
+
+```
+
+This code predicts the expected savings ratio for a new sourcing project using the trained Random Forest model. The project has 2 suppliers, falls under Logistics, has the reason "End User RFS - Normal", and a Phase 2 duration of 30 days. The model predicts a SavingsRatio of 0.1258, meaning the expected savings is 12.58% of the budget. For Honda, this prediction helps evaluate cost savings before making sourcing decisions. By adjusting input values, Honda can test different scenarios, compare strategies, and make data-driven choices to improve savings.
+
+## Ridge Regression Model
+After running multiple Ridge Regression models with different combinations of the variables, the output below is the best model. It uses: Number of Suppliers, Number of Proposals, Reason, Category, Region, and Phase 2 Correctness to predict Savings Ratio. 
+
+```{r}
+#Removed variables not included in the optimal ridge regression model
+#Note Duration must be removed because the Ridge model cannot handle 
+#the -1000 values like the Random Forrest can
+mergedData_Ridge3 <- mergedData[, !(colnames(mergedData) %in% 
+                                  c("ProjectID", "Budget", "Savings", 
+                                    "Owner", "Phase2Duration", "SpendLevel",
+                                    "qualityScore", "Commodity"))]
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(glmnet)
+# Prepare data for ridge regression
+x <- model.matrix(SavingsRatio ~ ., mergedData_Ridge3)[, -1]  # Exclude intercept
+y <- mergedData_Ridge3$SavingsRatio
+
+# Split data into training and test sets (80% training, 20% testing)
+set.seed(4620)
+train_index <- sample(seq_len(nrow(mergedData_Ridge3)), 
+                      size = 0.7 * nrow(mergedData_Ridge3))
+x_train <- x[train_index, ]
+y_train <- y[train_index]
+x_test <- x[-train_index, ]
+y_test <- y[-train_index]
+
+# Cross-validation to choose lambda for ridge regression
+cv_ridge <- cv.glmnet(x_train, y_train, alpha = 0)  
+plot(cv_ridge)
+
+# Choose the best lambda value
+best_lambda_ridge <- cv_ridge$lambda.min
+```
+This test multiple different values for lambda, a component in the ridge regression equation and validates it with the testing data to find the best value to use in the final model. This graph shows the different values on a Log Scale. The optimal value is  0.009371154. 
+
+
+```{r}
+# Fit the ridge regression model using the best lambda
+ridge_model <- glmnet(x_train, y_train, alpha = 0, lambda = best_lambda_ridge)
+
+
+# Make predictions on the test data
+predictions_test <- predict(ridge_model, s = best_lambda_ridge, newx = x_test)
+
+
+# Evaluate model performance on the test set
+mse_test <- mean((predictions_test - y_test)^2)  # Mean Squared Error
+rmse_test <- sqrt(mse_test)  # Root Mean Squared Error
+cat("Test MSE: ", mse_test, "\n")
+```
+
+The MSE is the average squared difference between the predicted and actual values on the test set. In the context of our problem, MSE is more difficult to interpret than the RMSE (Root Mean Squared Error). Instead, below we see that the RMSE is approximately 0.13. This tells us that, on average, our predicted savings rate deviates from the actual rate by about 0.13 points. In a practical context, if a project achieves a savings rate of 15%, the model on average predicts a rate that is approximately between 2% and 27%.
+
+```{r}
+cat("Test RMSE: ", rmse_test, "\n")
+```
+
+$R^2$ is a measure of how much of the variability in the target variable the model is able to explain. In the case of the ridge regression model, we see that it explains 25% of the variability in the savings rate. This leaves a large majority of the variability unexplained.
+
+```{r}
+#Compute R^2
+r2_test <- 1 - (sum((predictions_test - y_test)^2) / sum((y_test - mean(y_test))^2))
+cat("Test R²: ", r2_test, "\n")
+```
+
+Below we display the top 10 most influential variables determined by the ridge model. 
+
+```{r}
+# Extract and display coefficients of the ridge regression model
+ridge_coefficients <- coef(ridge_model, s = best_lambda_ridge)
+
+# Convert to a data frame for better readability
+ridge_coeff_df <- as.data.frame(as.matrix(ridge_coefficients))
+ridge_coeff_df$Variable <- rownames(ridge_coeff_df)
+colnames(ridge_coeff_df)[1] <- "Coefficient"
+
+# Remove intercept row for better interpretation
+ridge_coeff_df <- ridge_coeff_df[ridge_coeff_df$Variable != "(Intercept)", ]
+
+# Display sorted coefficients by absolute influence
+ridge_coeff_df <- ridge_coeff_df[order(abs(ridge_coeff_df$Coefficient), decreasing = TRUE), ]
+head(ridge_coeff_df,10) #display the top 10 most influential variables
+```
+
+Due to the high unexplained variability and an RMSE that is large in the context of the problem, it is best to proceed with caution when making assumptions or taking immediate actions based on the model. Ideally, we would like to see an RMSE closer to 0.05, indicating a 5% deviation from the truth, and a model that explains more variability without becoming overly complex. We recommend that Honda conduct further research to identify other factors not accounted for in the current model, which could have a greater impact on savings than the existing predictors.
+
+```{r echo=FALSE}
+# Predicted vs. Actual Plot with Transparency
+plot(y_test, predictions_test, main = "Predicted vs. Actual Values Ridge Regression", 
+     xlab = "Actual SavingsRatio", ylab = "Predicted SavingsRatio",
+     pch = 16, col = rgb(0, 0, 1, 0.5))  
+
+```
+The plot of Predicted vs. Actual Values for the ridge regression model shows the relationship between the true savings rate (y_test) and the model’s predictions (predictions_test). From the plot, we can visually observe the RMSE in action. Most points with an actual savings rate of 0 have predicted values less than 0.13, reflecting the model’s error margin.
+
+A more practical interpretation of the graph is that the model tends to predict savings rates that are below 25%. This suggests that, while some projects have true savings rates above 25%, the majority of projects do not, leading the model to under-predict higher savings rates. This indicates that the model has not learned to predict very high values as effectively, likely because such instances are less common in the data.
+
+
+## Additional plots exploring the data
+
+In this section we want to revisit some findings that we can derive by diving into the data more. While the models may not explain as much as we had hoped we can still derive other insights by looking at the data in other ways.
+
+```{r, echo=FALSE}
+# Compute counts per Region
+regionCounts <- mergedData %>%
+  group_by(Region) %>%
+  summarise(count = n())
+
+# Define custom labels for each Region
+customLabels <- c(
+  "American Motor",
+  "Mexico",
+  "Development & Manufactoring",
+  "Development and Mfg",
+  "Indiana",
+  "Other"
+)
+
+# Ensure labels match the unique Region values in order
+regionValues <- unique(mergedData$Region)
+
+# Create a named vector matching Region values to custom labels + counts
+labelMapping <- setNames(
+  paste0(customLabels, "\n(n=", regionCounts$count[match(regionValues, regionCounts$Region)], ")"),
+  regionValues
+)
+
+# Create the boxplot with the renamed labels and counts
+mergedData %>%
+  ggplot(aes(x = as.factor(Region), y = SavingsRatio, fill = as.factor(Region))) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Savings Ratio (Savings / Baseline Spend) \n by Region",
+       x = "Region",
+       y = "Savings / Baseline Spend Ratio") +
+  theme(
+    text = element_text(size = 15),  
+    axis.title = element_text(size = 15),  
+    axis.text = element_text(size = 15),  
+    plot.title = element_text(size = 15, face = "bold"),  
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1),  
+    legend.position = "none"  
+  ) +
+  scale_x_discrete(labels = labelMapping)
+
+
+```
+
+When plotting the savings rate by region, we cannot draw any concrete conclusions about savings based on these observations, as there are vast differences in the number of data points across regions. For example, Mexico and America each have over 250 projects, while a region labeled as "Other" only has one observation.
+
+However, one key takeaway is that Honda should consider enforcing stricter region classifications. Specifically, Indiana, if it is indeed a state in the U.S., should be classified under American Motor rather than being grouped by itself. This would help to standardize the data and improve the clarity of regional analysis.
+
+```{r, echo=FALSE}
+# Compute counts per Category
+categoryCounts <- mergedData %>%
+  group_by(Category) %>%
+  summarise(count = n())
+
+# Create the boxplot with the count labels
+mergedData %>%
+  ggplot(aes(x = as.factor(Category), y = SavingsRatio, fill = as.factor(Category))) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Savings Ratio (Savings / Budget) \n by Category",
+       x = "Category",
+       y = "Savings / Budget Ratio") +
+  theme(
+    text = element_text(size = 15),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    plot.title = element_text(size = 12, face = "bold"),
+    axis.text.x = element_text(size = 12, angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  scale_x_discrete(labels = function(x) {
+    counts <- categoryCounts$count[match(x, categoryCounts$Category)]
+    paste0(x, "\n(n=", counts, ")")  
+  })
+
+```
+
+Next, we examine savings rate by department. While the sample sizes are still uneven (e.g., Corporate Services has 176 projects, compared to only 34 in Marketing/Sales), we can still draw some initial conclusions. It appears that certain departments tend to achieve higher savings rates than others. Specifically, CAPEX, Marketing/Sales, and TSM departments show high median savings rates.
+
+It may be worth further investigating how projects within these departments differ to better understand whether departmental processes are a contributing factor to savings success.
+
+```{r, echo=FALSE}
+# Compute counts per NumSuppliers
+numSuppliersCounts <- mergedData %>%
+  group_by(NumSuppliers) %>%
+  summarise(count = n())
+
+# Create the boxplot with the count labels
+mergedData %>%
+  ggplot(aes(x = as.factor(NumSuppliers), y = SavingsRatio, fill = as.factor(NumSuppliers))) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Savings Ratio (Savings / Budget) \n by Number of Suppliers",
+       x = "Number of Suppliers",
+       y = "Savings / Budget Ratio") +
+  theme(
+    text = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    plot.title = element_text(size = 15, face = "bold"),
+    axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  scale_x_discrete(labels = function(x) {
+    counts <- numSuppliersCounts$count[match(x, numSuppliersCounts$NumSuppliers)]
+    paste0(x, "\n(n=", counts, ")")  # Append counts below labels
+  })
+
+```
+
+Another variable that was considered important is the number of suppliers invited. However, as the plot shows, employees performed poorly when documenting this information, with the majority of projects (503) indicating that 0 suppliers were invited.
+
+Honda should implement stricter protocols to ensure employees consistently input this data. Currently, the plot suggests that the more suppliers are invited, the higher the savings rate tends to be. However, due to the low number of observations in the higher supplier initiation bins, it’s difficult to draw definitive conclusions about the true relationship between the number of suppliers and savings.
+
+```{r, message=FALSE, echo=FALSE}
+# Filter for only positive Duration values
+filteredData <- mergedData %>%
+  filter(Phase2Duration > 0)
+
+# Create scatter plot
+filteredData %>%
+  ggplot(aes(x = Phase2Duration, y = SavingsRatio)) +
+  geom_point(alpha = 0.6, color = "steelblue") +  # Scatter points with transparency
+  geom_smooth(method = "lm", color = "red", se = FALSE) +  # Add trend line
+  theme_minimal() +
+  labs(title = "Savings Ratio vs. Duration (Only values with a duration for Phase 2)",
+       x = "Duration",
+       y = "Savings / Budget Ratio") +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+```
+
+The plot above is of savings rate vs. Phase 2 duration. The plot shows that most projects are completed in under 75 days, indicating that the current minimum project guideline is sufficient, as most projects tend to finish before 10 weeks. Given that the current highest minimum time frame is 8 weeks, this suggests the existing guideline is generally appropriate.
+
+While it is difficult to definitively conclude that the savings rate decreases as projects take longer, due to a scarcity of observations at the higher extremes, the projects that do extend beyond 100 days tend to show no savings. Specifically, most projects exceeding 100 days except one achieved no savings.
+
+```{r, echo=FALSE}
+# Compute counts per Phase2IsCorrect
+phaseCounts <- mergedData %>%
+  group_by(Phase2IsCorrect) %>%
+  summarise(count = n())
+
+# Create the boxplot with the count labels
+mergedData %>%
+  ggplot(aes(x = as.factor(Phase2IsCorrect), y = SavingsRatio, fill = as.factor(Phase2IsCorrect))) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Savings Ratio (Savings / Budget) \n by Phase 2 Correctness (Where Savings > 0)",
+       x = "Phase 2 Is Correct",
+       y = "Savings / Budget Ratio") +
+  theme(
+    text = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    plot.title = element_text(size = 15, face = "bold"),
+    axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  scale_x_discrete(labels = function(x) {
+    counts <- phaseCounts$count[match(x, phaseCounts$Phase2IsCorrect)]
+    paste0(x, "\n(n=", counts, ")")
+  })
+
+```
+
+In the box plot above, we compare the savings rate with whether Phase 2 was done correctly, including projects without a Phase 2. For projects without a Phase 2 or where Phase 2 was done incorrectly, the plot shows that the median savings rate is zero. However, several individual data points, represented by dots, indicate some savings, even in these cases.
+
+In contrast, for projects where Phase 2 was done correctly, the box plot shows a median savings rate greater than 5%. This suggests that completing Phase 2 properly is likely to contribute to successful savings outcomes, reinforcing the importance of ensuring Phase 2 is carried out correctly for maximizing savings. 
+
+However, it is important to note that the categories do not have the same number of observations, with only 96 projects having a correct Phase 2 and 200 projects having an incorrect Phase 2. This difference in sample size should be considered when interpreting the results, as the smaller number of projects with a correct Phase 2 may not fully represent the broader trend.
+
+```{r, echo=FALSE}
+# Filter for positive SavingsRatio values
+filteredData <- mergedData %>%
+  filter(SavingsRatio > 0)
+
+# Compute counts per Phase2IsCorrect (after filtering)
+phaseCounts <- filteredData %>%
+  group_by(Phase2IsCorrect) %>%
+  summarise(count = n())
+
+# Create the boxplot with the count labels
+filteredData %>%
+  ggplot(aes(x = as.factor(Phase2IsCorrect), y = SavingsRatio, fill = as.factor(Phase2IsCorrect))) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Savings Ratio (Savings / Budget) \n by Phase 2 Correctness (Where Savings > 0)",
+       x = "Phase 2 Done Correctly",
+       y = "Savings / Budget Ratio") +
+  theme(
+    text = element_text(size = 15),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15),
+    plot.title = element_text(size = 15, face = "bold"),
+    axis.text.x = element_text(size = 15, angle = 45, hjust = 1),
+    legend.position = "none"
+  ) +
+  scale_x_discrete(labels = function(x) {
+    counts <- phaseCounts$count[match(x, phaseCounts$Phase2IsCorrect)]
+    paste0(x, "\n(n=", counts, ")")
+  })
+
+```
+
+When focusing only on projects that achieved savings, we observe that the median savings rate is lowest for projects where Phase 2 was done incorrectly, highest for projects where Phase 2 was done correctly, and in between for projects that did not include Phase 2. This reinforces the importance of Phase 2 being done correctly, as projects that follow the proper procedures tend to achieve higher savings rates.
+
+In this instance, the discrepancy in sample sizes is reduced, with 65 projects having a correct Phase 2 and 90 projects having an incorrect Phase 2. This more balanced sample size allows for a clearer comparison of the savings outcomes across the different groups.
+
+## Conclusion
+
+Our analysis revealed key insights into the factors influencing the **Savings Ratio** in Honda’s procurement process. Both **Ridge Regression** and **Random Forest** models were applied to predict savings outcomes, with the following key findings:
+
+- The **Ridge Regression model** showed that a combination of **Number of Suppliers, Number of Proposals, Reason, Category, Region, and Phase 2 Correctness** can explain **25% of the variance in Savings Ratio**.
+- The **Random Forest model** highlighted the importance of **Phase 2 Duration and Number of Suppliers**:
+  - Ensuring that **Phase 2 steps are correctly logged** can improve data quality and enhance model performance.
+  - Projects with at least **three suppliers** tend to have a higher predicted Savings Ratio.
+  
+The Quality Score system provides a structured way to evaluate procurement project performance based on Phase 2 duration, supplier participation, and savings performance. Projects without a Phase 2 receive a default score of 100, while those with a Phase 2 are assessed based on key metrics. The scoring model prioritizes Phase 2 duration (60%), followed by supplier engagement (30%), and savings (10%). This structured evaluation helps Honda identify procurement inefficiencies, track project effectiveness, and refine sourcing strategies for better cost savings.
+
+Despite these insights, the models indicate that a large portion of the variability in savings remains unexplained. This suggests potential limitations in the available dataset and highlights areas for further investigation.
+
+## Limitation and Future Work
+- **Limited Data Representation**: The dataset may not fully capture the complexities of procurement savings, requiring additional features such as **supplier performance metrics, market trends, and contract details**.
+- **Need for More Data**: Expanding the dataset over a longer timeframe would improve the model’s ability to capture trends and relationships.
+
+## Final Recommendations
+To enhance procurement savings analysis and prediction, we recommend:
+
+1. **Improving Data Quality** – Ensuring Phase 2 data is logged correctly to increase predictive accuracy.
+
+2. **Encouraging Supplier Diversity** – Maintaining at least three suppliers in competitive sourcing projects.
+
+3. **Expanding Data Collection** – Including more projects and refining key features for better model performance.
+
+4. **Revisiting the Model** – Once more data becomes available, re-evaluating and improving the predictive model.
+
+By implementing these improvements, Honda can strengthen its procurement strategy and make more data-driven cost-saving decisions.
+
